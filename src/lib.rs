@@ -2,6 +2,7 @@ use std::unimplemented;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone)]
 struct Address {
     conn_string: String,
 }
@@ -14,6 +15,7 @@ trait Actor {
     fn dispatch_message(&mut self, message: Self::Message) -> ShouldTerminate;
 }
 
+// ToDo: Result?
 struct ShouldTerminate(bool);
 
 #[derive(Serialize, Deserialize)]
@@ -78,8 +80,8 @@ impl TestWorker {
 
 #[cfg(test)]
 mod tests {
-    use crate::TestWorker;
     use crate::{Actor, Address};
+    use crate::{TestWorker, TestWorkerMessage};
 
     #[test]
     fn create_worker() {
@@ -95,13 +97,29 @@ mod tests {
     #[test]
     fn run_worker() {
         let ctx = zmq::Context::new();
-        let mut worker = TestWorker::new(
-            ctx,
-            &Address {
-                conn_string: String::from("inproc://worker1"),
-            },
-        );
+        let address = Address {
+            conn_string: String::from("inproc://worker1"),
+        };
 
-        worker.run();
+        let ctx_copy = ctx.clone();
+        let address_copy = address.clone();
+        let thread_handle = std::thread::spawn(move || {
+            let mut worker = TestWorker::new(ctx_copy, &address_copy);
+
+            worker.run();
+        });
+
+        let control_socket = ctx.socket(zmq::PUSH).expect("Cannot create control socket");
+        control_socket
+            .connect(&address.conn_string)
+            .expect("Cannot connect control socket");
+
+        let message = TestWorkerMessage::MessageA;
+        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
+        control_socket
+            .send(&message_bytes, 0)
+            .expect("Cannot send message to worker");
+
+        thread_handle.join().expect("Cannot join worker thread");
     }
 }
