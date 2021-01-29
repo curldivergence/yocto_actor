@@ -1,9 +1,9 @@
 #[derive(Clone)]
-struct Address {
-    conn_string: String,
+pub struct Address {
+    pub conn_string: String,
 }
 
-trait Actor {
+pub trait Actor {
     type Message;
 
     fn new(zmq_ctx: zmq::Context, address: &Address) -> Self;
@@ -12,7 +12,10 @@ trait Actor {
 }
 
 // ToDo: Result?
-struct ShouldTerminate(bool);
+// ToDo: implement something fancier than .0, e.g. From(bool)
+pub struct ShouldTerminate(pub bool);
+
+pub use custom_derive::Actor;
 
 #[cfg(test)]
 mod tests {
@@ -119,10 +122,8 @@ mod tests {
         thread_handle.join().expect("Cannot join worker thread");
     }
 
-    use custom_derive::Actor;
-
     #[derive(Serialize, Deserialize, Actor)]
-    #[worker_type(TestWorker2)]
+    #[worker(TestWorker2)]
     enum TestWorker2Message {
         MessageA,
         // MessageB(u8, String),

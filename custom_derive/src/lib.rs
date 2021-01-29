@@ -6,7 +6,7 @@ use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::{parse_macro_input, DeriveInput};
 
-#[proc_macro_derive(Actor, attributes(worker_type))]
+#[proc_macro_derive(Actor, attributes(worker))]
 pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     // get the name of the type we want to implement the trait for
@@ -79,7 +79,7 @@ pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     }
 
     let expanded = quote! {
-      impl crate::Actor for #worker_type_name {
+      impl Actor for #worker_type_name {
         type Message = #enum_name;
 
         fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
