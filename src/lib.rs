@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 #[derive(Clone)]
 pub struct Address {
     pub conn_string: String,
@@ -6,8 +8,9 @@ pub struct Address {
 pub trait Actor {
     type Message;
 
-    fn new(zmq_ctx: zmq::Context, address: &Address) -> Self;
     fn run(&mut self);
+    fn pre_run(&mut self) {}
+    fn post_run(&mut self) {}
     fn dispatch_message(&mut self, message: Self::Message) -> ShouldTerminate;
 }
 
@@ -17,19 +20,12 @@ pub struct ShouldTerminate(pub bool);
 
 pub use custom_derive::Actor;
 
-pub fn send_message<T: serde::Serialize>(mailbox: &Mailbox, message: T) {
-    let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
-    mailbox
-        .control_socket
-        .send(&message_bytes, 0)
-        .expect("Cannot send message to worker");
+pub struct Outbox<ReceiverType> {
+    control_socket: zmq::Socket,
+    receiver: PhantomData<ReceiverType>,
 }
 
-pub struct Mailbox {
-    pub control_socket: zmq::Socket,
-}
-
-impl Mailbox {
+impl<ReceiverType> Outbox<ReceiverType> {
     pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
         let control_socket = zmq_ctx
             .socket(zmq::PUSH)
@@ -38,13 +34,47 @@ impl Mailbox {
             .connect(&address.conn_string)
             .expect("Cannot connect control socket");
 
-        Mailbox { control_socket }
+        Self {
+            control_socket,
+            receiver: PhantomData,
+        }
+    }
+
+    pub fn send<MessageType: serde::Serialize>(&self, message: MessageType) {
+        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
+        self.control_socket
+            .send(&message_bytes, 0)
+            .expect("Cannot send message to worker");
+    }
+}
+
+pub struct Inbox {
+    control_socket: zmq::Socket,
+}
+
+// ToDo: yeah, this duplication is sad, but will do for now
+impl Inbox {
+    pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
+        let control_socket = zmq_ctx
+            .socket(zmq::PULL)
+            .expect("Cannot create control socket");
+        control_socket
+            .bind(&address.conn_string)
+            .expect("Cannot connect control socket");
+
+        Inbox { control_socket }
+    }
+
+    pub fn receive(&self) -> Vec<u8> {
+        self.control_socket
+            .recv_bytes(0)
+            .expect("Actor cannot receive message bytes")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Actor, Address, Mailbox, ShouldTerminate};
+    use crate::{Actor, Address, Inbox, Outbox, ShouldTerminate};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -55,27 +85,16 @@ mod tests {
     }
 
     struct TestWorker1 {
-        socket: zmq::Socket,
+        inbox: Inbox,
+        payload: u64,
     }
 
     impl Actor for TestWorker1 {
         type Message = TestWorker1Message;
 
-        fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
-            let socket = zmq_ctx
-                .socket(zmq::PULL)
-                .expect("Cannot create pull socket");
-            let address = &address.conn_string;
-            socket.bind(&address).expect("Cannot bind pull socket");
-            Self { socket }
-        }
-
         fn run(&mut self) {
             loop {
-                let message_bytes = self
-                    .socket
-                    .recv_bytes(0)
-                    .expect("Actor cannot receive message bytes");
+                let message_bytes = self.inbox.receive();
                 let message: Self::Message =
                     bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
                 if self.dispatch_message(message).0 {
@@ -94,6 +113,13 @@ mod tests {
     }
 
     impl TestWorker1 {
+        fn new(zmq_ctx: zmq::Context, address: &Address, payload: u64) -> Self {
+            Self {
+                inbox: Inbox::new(zmq_ctx, address),
+                payload,
+            }
+        }
+
         fn handle_message_a(&mut self) -> ShouldTerminate {
             ShouldTerminate(true)
         }
@@ -115,6 +141,7 @@ mod tests {
             &Address {
                 conn_string: String::from("inproc://worker1"),
             },
+            42,
         );
     }
 
@@ -128,22 +155,14 @@ mod tests {
         let ctx_copy = ctx.clone();
         let address_copy = address.clone();
         let thread_handle = std::thread::spawn(move || {
-            let mut worker = TestWorker1::new(ctx_copy, &address_copy);
+            let mut worker = TestWorker1::new(ctx_copy, &address_copy, 42);
 
             worker.run();
         });
 
-        let control_socket = ctx.socket(zmq::PUSH).expect("Cannot create control socket");
-        control_socket
-            .connect(&address.conn_string)
-            .expect("Cannot connect control socket");
-
+        let outbox: Outbox<TestWorker1> = Outbox::new(ctx, &address);
         let message = TestWorker1Message::MessageA;
-        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
-        control_socket
-            .send(&message_bytes, 0)
-            .expect("Cannot send message to worker");
-
+        outbox.send(message);
         thread_handle.join().expect("Cannot join worker thread");
     }
 
@@ -157,10 +176,16 @@ mod tests {
 
     struct TestWorker2 {
         // ToDo: is there any way to automate this or, at least, enforce?
-        socket: zmq::Socket,
+        inbox: Inbox,
     }
 
     impl TestWorker2 {
+        fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
+            Self {
+                inbox: Inbox::new(zmq_ctx, address),
+            }
+        }
+
         fn handle_message_a(&mut self) -> ShouldTerminate {
             println!("Received message A");
             ShouldTerminate(true)
@@ -198,15 +223,15 @@ mod tests {
             worker.run();
         });
 
-        let mailbox = Mailbox::new(ctx, &address);
+        let mailbox: Outbox<TestWorker2> = Outbox::new(ctx, &address);
         let message = TestWorker2Message::MessageC {
             c_foo: 42,
             c_bar: "hello world".to_owned(),
         };
-        crate::send_message(&mailbox, message);
+        mailbox.send(message);
 
         let message = TestWorker2Message::MessageA;
-        crate::send_message(&mailbox, message);
+        mailbox.send(message);
 
         thread_handle.join().expect("Cannot join worker thread");
     }

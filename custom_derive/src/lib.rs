@@ -11,14 +11,14 @@ pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     // get the name of the type we want to implement the trait for
     let enum_name = &input.ident;
-    eprintln!("ident name: {}", enum_name);
+    // eprintln!("ident name: {}", enum_name);
 
-    eprintln!("attr count: {}", input.attrs.len());
+    // eprintln!("attr count: {}", input.attrs.len());
     let worker_type_name = input.attrs[0]
         .parse_args::<Ident>()
         .expect("Cannot parse arguments of 'message_type' attribute");
 
-    eprintln!("first attr name: {}", &worker_type_name);
+    // eprintln!("first attr name: {}", &worker_type_name);
     let enum_data = if let syn::Data::Enum(data) = &input.data {
         data
     } else {
@@ -33,26 +33,26 @@ pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             &format!("handle_{}", &variant_name).to_snake_case(),
             Span::call_site(),
         );
-        eprintln!(
-            "Found variant {}, handler function name: {}",
-            &variant_name, handler_method_name
-        );
+        // eprintln!(
+        //     "Found variant {}, handler function name: {}",
+        //     &variant_name, handler_method_name
+        // );
 
         let variant_type = match &variant_data.fields {
             syn::Fields::Unit => {
-                eprintln!("variant type: unit");
+                // eprintln!("variant type: unit");
                 let current_arm = quote! (
                     Self::Message::#variant_name => self. #handler_method_name(),
                 );
-                eprintln!("Current arm: {}", &current_arm);
+                // eprintln!("Current arm: {}", &current_arm);
                 dispatch_arms.extend(current_arm);
             }
             syn::Fields::Unnamed(unnamed) => {
-                eprintln!("variant type: unnamed");
+                // eprintln!("variant type: unnamed");
                 unimplemented!("Tuple variants are not supported") // ToDo
             }
             syn::Fields::Named(named_fields) => {
-                eprintln!("variant type: named");
+                // eprintln!("variant type: named");
 
                 // let mut handler_arguments = TokenStream::new();
                 let mut destructured_fields = TokenStream::new();
@@ -60,11 +60,11 @@ pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 for field in named_fields.named.iter() {
                     let field_name = &field.ident.as_ref().expect("expected a named field");
                     let field_type = &field.ty;
-                    eprintln!(
-                        "Found named field: name {}, type {}",
-                        field_name,
-                        field_type.to_token_stream().to_string()
-                    );
+                    // eprintln!(
+                    //     "Found named field: name {}, type {}",
+                    //     field_name,
+                    //     field_type.to_token_stream().to_string()
+                    // );
                     destructured_fields.extend(quote!(#field_name,));
                     // handler_arguments.extend(quote! (#field_name : #field_type,));
                 }
@@ -72,7 +72,7 @@ pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 let current_arm = quote! (
                     Self::Message::#variant_name{ #destructured_fields } => self. #handler_method_name(#destructured_fields),
                 );
-                eprintln!("Current arm: {}", &current_arm);
+                // eprintln!("Current arm: {}", &current_arm);
                 dispatch_arms.extend(current_arm);
             }
         };
@@ -82,26 +82,18 @@ pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
       impl Actor for #worker_type_name {
         type Message = #enum_name;
 
-        fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
-            let socket = zmq_ctx
-                .socket(zmq::PULL)
-                .expect("Cannot create pull socket");
-            let address = &address.conn_string;
-            socket.bind(&address).expect("Cannot bind pull socket");
-            Self { socket }
-        }
-
         fn run(&mut self) {
             loop {
-                let message_bytes = self
-                    .socket
-                    .recv_bytes(0)
-                    .expect("Actor cannot receive message bytes");
+                self.pre_run();
+
+                let message_bytes = self.inbox.receive();
                 let message: Self::Message =
                     bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
                 if self.dispatch_message(message).0 {
                     break;
                 }
+
+                self.post_run();
             }
         }
 
