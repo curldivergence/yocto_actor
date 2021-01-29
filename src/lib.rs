@@ -17,9 +17,34 @@ pub struct ShouldTerminate(pub bool);
 
 pub use custom_derive::Actor;
 
+pub fn send_message<T: serde::Serialize>(mailbox: &Mailbox, message: T) {
+    let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
+    mailbox
+        .control_socket
+        .send(&message_bytes, 0)
+        .expect("Cannot send message to worker");
+}
+
+pub struct Mailbox {
+    pub control_socket: zmq::Socket,
+}
+
+impl Mailbox {
+    pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
+        let control_socket = zmq_ctx
+            .socket(zmq::PUSH)
+            .expect("Cannot create control socket");
+        control_socket
+            .connect(&address.conn_string)
+            .expect("Cannot connect control socket");
+
+        Mailbox { control_socket }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Actor, Address, ShouldTerminate};
+    use crate::{Actor, Address, Mailbox, ShouldTerminate};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -173,25 +198,15 @@ mod tests {
             worker.run();
         });
 
-        let control_socket = ctx.socket(zmq::PUSH).expect("Cannot create control socket");
-        control_socket
-            .connect(&address.conn_string)
-            .expect("Cannot connect control socket");
-
+        let mailbox = Mailbox::new(ctx, &address);
         let message = TestWorker2Message::MessageC {
             c_foo: 42,
             c_bar: "hello world".to_owned(),
         };
-        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
-        control_socket
-            .send(&message_bytes, 0)
-            .expect("Cannot send message to worker");
+        crate::send_message(&mailbox, message);
 
         let message = TestWorker2Message::MessageA;
-        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
-        control_socket
-            .send(&message_bytes, 0)
-            .expect("Cannot send message to worker");
+        crate::send_message(&mailbox, message);
 
         thread_handle.join().expect("Cannot join worker thread");
     }
