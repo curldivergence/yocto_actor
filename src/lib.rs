@@ -121,14 +121,26 @@ mod tests {
 
     use custom_derive::Actor;
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Actor)]
+    #[worker_type(TestWorker2)]
     enum TestWorker2Message {
         MessageA,
-        MessageB(u8, String),
+        // MessageB(u8, String),
         MessageC { c_foo: u64, c_bar: String },
     }
 
-    #[derive(Actor)]
-    #[message_type(TestWorker2Message)]
-    struct TestWorker2 {}
+    struct TestWorker2 {
+        // ToDo: is there any way to automate this or, at least, enforce?
+        socket: zmq::Socket,
+    }
+
+    impl TestWorker2 {
+        fn handle_message_a(&mut self) -> ShouldTerminate {
+            ShouldTerminate(true)
+        }
+
+        fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
+            ShouldTerminate(false)
+        }
+    }
 }
