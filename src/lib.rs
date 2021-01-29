@@ -80,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn create_worker() {
+    fn create_handmade_worker() {
         let ctx = zmq::Context::new();
         TestWorker1::new(
             ctx,
@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn run_worker() {
+    fn run_handmade_worker() {
         let ctx = zmq::Context::new();
         let address = Address {
             conn_string: String::from("inproc://worker1"),
@@ -136,11 +136,62 @@ mod tests {
 
     impl TestWorker2 {
         fn handle_message_a(&mut self) -> ShouldTerminate {
+            println!("Received message A");
             ShouldTerminate(true)
         }
 
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
+            println!("Received message C: c_foo: {}, c_bar: {}", c_foo, c_bar);
             ShouldTerminate(false)
         }
+    }
+
+    #[test]
+    fn create_derived_worker() {
+        let ctx = zmq::Context::new();
+        TestWorker2::new(
+            ctx,
+            &Address {
+                conn_string: String::from("inproc://worker2"),
+            },
+        );
+    }
+
+    #[test]
+    fn run_derived_worker() {
+        let ctx = zmq::Context::new();
+        let address = Address {
+            conn_string: String::from("inproc://worker2"),
+        };
+
+        let ctx_copy = ctx.clone();
+        let address_copy = address.clone();
+        let thread_handle = std::thread::spawn(move || {
+            let mut worker = TestWorker2::new(ctx_copy, &address_copy);
+
+            worker.run();
+        });
+
+        let control_socket = ctx.socket(zmq::PUSH).expect("Cannot create control socket");
+        control_socket
+            .connect(&address.conn_string)
+            .expect("Cannot connect control socket");
+
+        let message = TestWorker2Message::MessageC {
+            c_foo: 42,
+            c_bar: "hello world".to_owned(),
+        };
+        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
+        control_socket
+            .send(&message_bytes, 0)
+            .expect("Cannot send message to worker");
+
+        let message = TestWorker2Message::MessageA;
+        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
+        control_socket
+            .send(&message_bytes, 0)
+            .expect("Cannot send message to worker");
+
+        thread_handle.join().expect("Cannot join worker thread");
     }
 }
