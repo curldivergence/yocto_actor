@@ -1,9 +1,18 @@
+use bincode::config;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Address {
     pub conn_string: String,
+}
+
+impl From<&str> for Address {
+    fn from(conn_string: &str) -> Self {
+        Self {
+            conn_string: conn_string.to_owned(),
+        }
+    }
 }
 
 pub trait Actor {
@@ -146,21 +155,13 @@ mod tests {
     #[test]
     fn create_handmade_worker() {
         let ctx = zmq::Context::new();
-        TestWorker1::new(
-            ctx,
-            &Address {
-                conn_string: String::from("inproc://worker1"),
-            },
-            42,
-        );
+        TestWorker1::new(ctx, &Address::from("inproc://worker1"), 42);
     }
 
     #[test]
     fn run_handmade_worker() {
         let ctx = zmq::Context::new();
-        let address = Address {
-            conn_string: String::from("inproc://worker1"),
-        };
+        let address = Address::from("inproc://worker1");
 
         let ctx_copy = ctx.clone();
         let address_copy = address.clone();
@@ -210,20 +211,13 @@ mod tests {
     #[test]
     fn create_derived_worker() {
         let ctx = zmq::Context::new();
-        TestWorker2::new(
-            ctx,
-            &Address {
-                conn_string: String::from("inproc://worker2"),
-            },
-        );
+        TestWorker2::new(ctx, &Address::from("inproc://worker2"));
     }
 
     #[test]
     fn run_derived_worker() {
         let ctx = zmq::Context::new();
-        let address = Address {
-            conn_string: String::from("inproc://worker2"),
-        };
+        let address = Address::from("inproc://worker2");
 
         let ctx_copy = ctx.clone();
         let address_copy = address.clone();
