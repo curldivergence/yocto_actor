@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Address {
     pub conn_string: String,
 }
@@ -15,8 +16,20 @@ pub trait Actor {
 }
 
 // ToDo: Result?
-// ToDo: implement something fancier than .0, e.g. From(bool)
-pub struct ShouldTerminate(pub bool);
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShouldTerminate(bool);
+
+impl From<bool> for ShouldTerminate {
+    fn from(value: bool) -> Self {
+        Self(value)
+    }
+}
+
+impl Into<bool> for ShouldTerminate {
+    fn into(self) -> bool {
+        self.0
+    }
+}
 
 pub use custom_derive::Actor;
 
@@ -121,15 +134,15 @@ mod tests {
         }
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
-            ShouldTerminate(true)
+            ShouldTerminate::from(true)
         }
 
         fn handle_message_b(&mut self, params: (u8, String)) -> ShouldTerminate {
-            ShouldTerminate(false)
+            ShouldTerminate::from(false)
         }
 
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
-            ShouldTerminate(false)
+            ShouldTerminate::from(false)
         }
     }
 
@@ -188,12 +201,12 @@ mod tests {
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
             println!("Received message A");
-            ShouldTerminate(true)
+            ShouldTerminate::from(true)
         }
 
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
             println!("Received message C: c_foo: {}, c_bar: {}", c_foo, c_bar);
-            ShouldTerminate(false)
+            ShouldTerminate::from(false)
         }
     }
 

@@ -97,7 +97,7 @@ pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                         let message_bytes = self.inbox.receive();
                         let message: Self::Message =
                             bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
-                        if self.dispatch_message(message).0 {
+                        if self.dispatch_message(message).into() {
                             break;
                         }
 
