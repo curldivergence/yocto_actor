@@ -50,8 +50,8 @@ impl Outbox {
         Self { control_socket }
     }
 
-    pub fn send<MessageType: serde::Serialize>(&self, message: MessageType) {
-        let message_bytes = bincode::serialize(&message).expect("Cannot serialize message");
+    pub fn send<MessageType: serde::Serialize>(&self, message: &MessageType) {
+        let message_bytes = bincode::serialize(message).expect("Cannot serialize message");
         self.control_socket
             .send(&message_bytes, 0)
             .expect("Cannot send message to worker");
@@ -172,7 +172,7 @@ mod tests {
 
         let outbox = Outbox::new(ctx, &address);
         let message = TestWorker1Message::MessageA;
-        outbox.send(message);
+        outbox.send(&message);
         thread_handle.join().expect("Cannot join worker thread");
     }
 
@@ -238,10 +238,10 @@ mod tests {
             c_foo: 42,
             c_bar: "hello world".to_owned(),
         };
-        mailbox.send(message);
+        mailbox.send(&message);
 
         let message = TestWorker2Message::MessageA;
-        mailbox.send(message);
+        mailbox.send(&message);
 
         thread_handle.join().expect("Cannot join worker thread");
     }
