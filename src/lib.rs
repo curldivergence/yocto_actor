@@ -33,12 +33,12 @@ impl Into<bool> for ShouldTerminate {
 
 pub use custom_derive::Actor;
 
-pub struct Outbox<ReceiverType> {
+// ToDo: store receiver name or some kind of id?
+pub struct Outbox {
     control_socket: zmq::Socket,
-    receiver: PhantomData<ReceiverType>,
 }
 
-impl<ReceiverType> Outbox<ReceiverType> {
+impl Outbox {
     pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
         let control_socket = zmq_ctx
             .socket(zmq::PUSH)
@@ -47,10 +47,7 @@ impl<ReceiverType> Outbox<ReceiverType> {
             .connect(&address.conn_string)
             .expect("Cannot connect control socket");
 
-        Self {
-            control_socket,
-            receiver: PhantomData,
-        }
+        Self { control_socket }
     }
 
     pub fn send<MessageType: serde::Serialize>(&self, message: MessageType) {
@@ -173,7 +170,7 @@ mod tests {
             worker.run();
         });
 
-        let outbox: Outbox<TestWorker1> = Outbox::new(ctx, &address);
+        let outbox = Outbox::new(ctx, &address);
         let message = TestWorker1Message::MessageA;
         outbox.send(message);
         thread_handle.join().expect("Cannot join worker thread");
@@ -236,7 +233,7 @@ mod tests {
             worker.run();
         });
 
-        let mailbox: Outbox<TestWorker2> = Outbox::new(ctx, &address);
+        let mailbox = Outbox::new(ctx, &address);
         let message = TestWorker2Message::MessageC {
             c_foo: 42,
             c_bar: "hello world".to_owned(),
