@@ -97,10 +97,29 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
-    enum TestWorker1Message {
+    enum FirstMessageType {
         MessageA,
         MessageB(u8, String),
         MessageC { c_foo: u64, c_bar: String },
+    }
+
+    trait FirstMessageTypeTrait {
+        fn run(&mut self);
+        fn pre_run(&mut self) {}
+        fn post_run(&mut self) {}
+        fn dispatch_message(&mut self, message: FirstMessageType) -> ShouldTerminate {
+            match message {
+                FirstMessageType::MessageA => self.handle_message_a(),
+                FirstMessageType::MessageB(val1, val2) => self.handle_message_b((val1, val2)),
+                FirstMessageType::MessageC { c_foo, c_bar } => self.handle_message_c(c_foo, c_bar),
+            }
+        }
+
+        // Event handlers
+
+        fn handle_message_a(&mut self) -> ShouldTerminate;
+        fn handle_message_b(&mut self, data: (u8,  String)) -> ShouldTerminate;
+        fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate;
     }
 
     struct TestWorker1 {
@@ -108,34 +127,15 @@ mod tests {
         payload: u64,
     }
 
-    impl Actor for TestWorker1 {
-        type Message = TestWorker1Message;
-
+    impl FirstMessageTypeTrait for TestWorker1 {
         fn run(&mut self) {
             loop {
                 let message_bytes = self.inbox.receive();
-                let message: Self::Message =
+                let message: FirstMessageType =
                     bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
                 if self.dispatch_message(message).0 {
                     break;
                 }
-            }
-        }
-
-        fn dispatch_message(&mut self, message: Self::Message) -> ShouldTerminate {
-            match message {
-                Self::Message::MessageA => self.handle_message_a(),
-                Self::Message::MessageB(val1, val2) => self.handle_message_b((val1, val2)),
-                Self::Message::MessageC { c_foo, c_bar } => self.handle_message_c(c_foo, c_bar),
-            }
-        }
-    }
-
-    impl TestWorker1 {
-        fn new(zmq_ctx: zmq::Context, address: &Address, payload: u64) -> Self {
-            Self {
-                inbox: Inbox::new(zmq_ctx, address),
-                payload,
             }
         }
 
@@ -149,6 +149,15 @@ mod tests {
 
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
             ShouldTerminate::from(false)
+        }
+    }
+
+    impl TestWorker1 {
+        fn new(zmq_ctx: zmq::Context, address: &Address, payload: u64) -> Self {
+            Self {
+                inbox: Inbox::new(zmq_ctx, address),
+                payload,
+            }
         }
     }
 
@@ -172,7 +181,7 @@ mod tests {
         });
 
         let outbox = Outbox::new(ctx, &address);
-        let message = TestWorker1Message::MessageA;
+        let message = FirstMessageType::MessageA;
         outbox.send(&message);
         thread_handle.join().expect("Cannot join worker thread");
     }
