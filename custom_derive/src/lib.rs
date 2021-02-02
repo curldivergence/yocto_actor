@@ -93,7 +93,7 @@ pub fn actor_message(
     expanded.extend(quote! {
         #input
 
-        trait #trait_name {
+        pub trait #trait_name {
             fn pre_run(&mut self) {}
             fn post_run(&mut self) {}
 
@@ -106,7 +106,7 @@ pub fn actor_message(
                     let message_bytes = self.receive();
                     let message: #enum_name =
                         bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
-                    if self.dispatch_message(message).0 {
+                    if self.dispatch_message(message).into() {
                         break;
                     }
 
