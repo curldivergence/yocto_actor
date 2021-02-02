@@ -6,113 +6,123 @@ use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::{parse_macro_input, DeriveInput, Path};
 
-#[proc_macro_derive(Actor, attributes(worker))]
-pub fn derive_actor(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+#[proc_macro_attribute]
+pub fn actor_message(
+    _attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
     // get the name of the type we want to implement the trait for
     let enum_name = &input.ident;
-    // eprintln!("ident name: {}", enum_name);
-
-    assert!(
-        input.attrs.len() > 0,
-        "No [worker()] attribute has been set on the message enum"
-    );
+    eprintln!("[yocto_actor][actor_message] enum name: {}", enum_name);
 
     let mut expanded = TokenStream::new();
 
-    for worker_type_attr in &input.attrs {
-        // eprintln!("attr count: {}", &input.attrs.len());
+    let enum_data = if let syn::Data::Enum(data) = &input.data {
+        data
+    } else {
+        panic!("[yocto_actor][actor_message] {} is not an enum", enum_name);
+    };
 
-        let worker_type_name: TokenStream = worker_type_attr
-            .parse_args()
-            .expect("Cannot parse #[worker(...)] attribute");
-        // eprintln!("first attr name: {}", &worker_type_name);
-        let enum_data = if let syn::Data::Enum(data) = &input.data {
-            data
-        } else {
-            panic!("{} is not an enum", enum_name);
-        };
+    let trait_name = Ident::new(&format!("{}Handler", &enum_name), Span::call_site());
 
-        let mut dispatch_arms = TokenStream::new();
+    eprintln!("[yocto_actor][actor_message] trait name: {}", trait_name);
 
-        for variant_data in &enum_data.variants {
-            let variant_name = &variant_data.ident;
-            let handler_method_name = Ident::new(
-                &format!("handle_{}", &variant_name).to_snake_case(),
-                Span::call_site(),
-            );
-            // eprintln!(
-            //     "Found variant {}, handler function name: {}",
-            //     &variant_name, handler_method_name
-            // );
+    let mut dispatch_arms = TokenStream::new();
+    let mut handler_prototypes = TokenStream::new();
 
-            let variant_type = match &variant_data.fields {
-                syn::Fields::Unit => {
-                    // eprintln!("variant type: unit");
-                    let current_arm = quote! (
-                        Self::Message::#variant_name => self. #handler_method_name(),
-                    );
-                    // eprintln!("Current arm: {}", &current_arm);
-                    dispatch_arms.extend(current_arm);
-                }
-                syn::Fields::Unnamed(_unnamed) => {
-                    // eprintln!("variant type: unnamed");
-                    unimplemented!("Tuple variants are not supported") // ToDo
-                }
-                syn::Fields::Named(named_fields) => {
-                    // eprintln!("variant type: named");
+    for variant_data in &enum_data.variants {
+        let variant_name = &variant_data.ident;
+        let handler_method_name = Ident::new(
+            &format!("handle_{}", &variant_name).to_snake_case(),
+            Span::call_site(),
+        );
 
-                    // let mut handler_arguments = TokenStream::new();
-                    let mut destructured_fields = TokenStream::new();
+        eprintln!(
+            "[yocto_actor][actor_message] found variant {}, handler function name: {}",
+            &variant_name, handler_method_name
+        );
 
-                    for field in named_fields.named.iter() {
-                        let field_name = &field.ident.as_ref().expect("expected a named field");
-                        let field_type = &field.ty;
-                        // eprintln!(
-                        //     "Found named field: name {}, type {}",
-                        //     field_name,
-                        //     field_type.to_token_stream().to_string()
-                        // );
-                        destructured_fields.extend(quote!(#field_name,));
-                        // handler_arguments.extend(quote! (#field_name : #field_type,));
-                    }
-
-                    let current_arm = quote! (
-                        Self::Message::#variant_name{ #destructured_fields } => self. #handler_method_name(#destructured_fields),
-                    );
-                    // eprintln!("Current arm: {}", &current_arm);
-                    dispatch_arms.extend(current_arm);
-                }
-            };
-        }
-
-        expanded.extend(quote! {
-            impl Actor for #worker_type_name {
-                type Message = #enum_name;
-
-                fn run(&mut self) {
-                    loop {
-                        self.pre_run();
-
-                        let message_bytes = self.inbox.receive();
-                        let message: Self::Message =
-                            bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
-                        if self.dispatch_message(message).into() {
-                            break;
-                        }
-
-                        self.post_run();
-                    }
-                }
-
-                fn dispatch_message(&mut self, message: Self::Message) -> ShouldTerminate {
-                    match message {
-                        #dispatch_arms
-                    }
-                }
+        match &variant_data.fields {
+            syn::Fields::Unit => {
+                eprintln!("[yocto_actor][actor_message] variant type: unit");
+                let current_arm = quote! (
+                    #enum_name::#variant_name => self. #handler_method_name(),
+                );
+                eprintln!("[yocto_actor][actor_message] Current arm: {}", &current_arm);
+                dispatch_arms.extend(current_arm);
+                handler_prototypes.extend(quote! {
+                    fn #handler_method_name(&mut self) -> ShouldTerminate;
+                });
             }
-        });
+            syn::Fields::Unnamed(_unnamed) => {
+                eprintln!("[yocto_actor][actor_message] variant type: unnamed");
+                unimplemented!("Tuple variants are not supported") // ToDo
+            }
+            syn::Fields::Named(named_fields) => {
+                eprintln!("[yocto_actor][actor_message] variant type: named");
+
+                let mut handler_arguments = TokenStream::new();
+                let mut destructured_fields = TokenStream::new();
+
+                for field in named_fields.named.iter() {
+                    let field_name = &field.ident.as_ref().expect("expected a named field");
+                    let field_type = &field.ty;
+                    eprintln!(
+                        "[yocto_actor][actor_message] Found named field: name {}, type {}",
+                        field_name,
+                        field_type.to_token_stream().to_string()
+                    );
+                    destructured_fields.extend(quote!(#field_name,));
+                    handler_arguments.extend(quote! (#field_name : #field_type,));
+                }
+
+                let current_arm = quote! (
+                    #enum_name::#variant_name{ #destructured_fields } => self. #handler_method_name(#destructured_fields),
+                );
+                eprintln!("[yocto_actor][actor_message] Current arm: {}", &current_arm);
+                dispatch_arms.extend(current_arm);
+
+                handler_prototypes.extend(quote! {
+                    fn #handler_method_name(&mut self, #handler_arguments) -> ShouldTerminate;
+                });
+            }
+        };
     }
 
+    expanded.extend(quote! {
+        #input
+
+        trait #trait_name {
+            fn pre_run(&mut self) {}
+            fn post_run(&mut self) {}
+
+            fn receive(&self) -> Vec<u8>;
+
+            fn run(&mut self) {
+                loop {
+                    self.pre_run();
+
+                    let message_bytes = self.receive();
+                    let message: #enum_name =
+                        bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
+                    if self.dispatch_message(message).0 {
+                        break;
+                    }
+
+                    self.post_run();
+                }
+            }
+
+            fn dispatch_message(&mut self, message: #enum_name) -> ShouldTerminate {
+                match message {
+                    #dispatch_arms
+                }
+            }
+
+            #handler_prototypes
+        }
+    });
+    eprintln!("[yocto_actor][actor_message] final result: {}", expanded);
     proc_macro::TokenStream::from(expanded)
 }

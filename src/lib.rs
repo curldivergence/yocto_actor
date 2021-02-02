@@ -2,6 +2,8 @@ use bincode::config;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
+pub use custom_derive::actor_message;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Address {
     pub conn_string: String,
@@ -13,15 +15,6 @@ impl From<&str> for Address {
             conn_string: conn_string.to_owned(),
         }
     }
-}
-
-pub trait Actor {
-    type Message;
-
-    fn run(&mut self);
-    fn pre_run(&mut self) {}
-    fn post_run(&mut self) {}
-    fn dispatch_message(&mut self, message: Self::Message) -> ShouldTerminate;
 }
 
 // ToDo: Result?
@@ -40,38 +33,10 @@ impl Into<bool> for ShouldTerminate {
     }
 }
 
-pub use custom_derive::Actor;
-
-// ToDo: store receiver name or some kind of id?
-pub struct Outbox {
-    control_socket: zmq::Socket,
-}
-
-impl Outbox {
-    pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
-        let control_socket = zmq_ctx
-            .socket(zmq::PUSH)
-            .expect("Cannot create control socket");
-        control_socket
-            .connect(&address.conn_string)
-            .expect("Cannot connect control socket");
-
-        Self { control_socket }
-    }
-
-    pub fn send<MessageType: serde::Serialize>(&self, message: &MessageType) {
-        let message_bytes = bincode::serialize(message).expect("Cannot serialize message");
-        self.control_socket
-            .send(&message_bytes, 0)
-            .expect("Cannot send message to worker");
-    }
-}
-
 pub struct Inbox {
     control_socket: zmq::Socket,
 }
 
-// ToDo: yeah, this duplication is sad, but will do for now
 impl Inbox {
     pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
         let control_socket = zmq_ctx
@@ -91,9 +56,35 @@ impl Inbox {
     }
 }
 
+// ToDo: store receiver name or some kind of id?
+pub struct Outbox {
+    control_socket: zmq::Socket,
+}
+
+impl Outbox {
+    // ToDo: yeah, this duplication is sad, but will do for now
+    pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
+        let control_socket = zmq_ctx
+            .socket(zmq::PUSH)
+            .expect("Cannot create control socket");
+        control_socket
+            .connect(&address.conn_string)
+            .expect("Cannot connect control socket");
+
+        Self { control_socket }
+    }
+
+    pub fn send<MessageType: serde::Serialize>(&self, message: &MessageType) {
+        let message_bytes = bincode::serialize(message).expect("Cannot serialize message");
+        self.control_socket
+            .send(&message_bytes, 0)
+            .expect("Cannot send message to worker");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Actor, Address, Inbox, Outbox, ShouldTerminate};
+    use crate::{Address, Inbox, Outbox, ShouldTerminate};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -103,10 +94,27 @@ mod tests {
         MessageC { c_foo: u64, c_bar: String },
     }
 
-    trait FirstMessageTypeTrait {
-        fn run(&mut self);
+    trait FirstMessageTypeHandler {
         fn pre_run(&mut self) {}
         fn post_run(&mut self) {}
+
+        fn receive(&self) -> Vec<u8>;
+
+        fn run(&mut self) {
+            loop {
+                self.pre_run();
+
+                let message_bytes = self.receive();
+                let message: FirstMessageType =
+                    bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
+                if self.dispatch_message(message).0 {
+                    break;
+                }
+
+                self.post_run();
+            }
+        }
+
         fn dispatch_message(&mut self, message: FirstMessageType) -> ShouldTerminate {
             match message {
                 FirstMessageType::MessageA => self.handle_message_a(),
@@ -118,7 +126,7 @@ mod tests {
         // Event handlers
 
         fn handle_message_a(&mut self) -> ShouldTerminate;
-        fn handle_message_b(&mut self, data: (u8,  String)) -> ShouldTerminate;
+        fn handle_message_b(&mut self, data: (u8, String)) -> ShouldTerminate;
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate;
     }
 
@@ -127,16 +135,9 @@ mod tests {
         payload: u64,
     }
 
-    impl FirstMessageTypeTrait for TestWorker1 {
-        fn run(&mut self) {
-            loop {
-                let message_bytes = self.inbox.receive();
-                let message: FirstMessageType =
-                    bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
-                if self.dispatch_message(message).0 {
-                    break;
-                }
-            }
+    impl FirstMessageTypeHandler for TestWorker1 {
+        fn receive(&self) -> Vec<u8> {
+            self.inbox.receive()
         }
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
@@ -149,6 +150,10 @@ mod tests {
 
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
             ShouldTerminate::from(false)
+        }
+
+        fn pre_run(&mut self) {
+            println!("This is pre_run!");
         }
     }
 
@@ -186,24 +191,26 @@ mod tests {
         thread_handle.join().expect("Cannot join worker thread");
     }
 
-    #[derive(Serialize, Deserialize, Actor)]
-    #[worker(TestWorker2)]
-    enum TestWorker2Message {
+    use custom_derive::actor_message;
+    #[actor_message]
+    #[derive(Serialize, Deserialize)]
+    enum SecondMessageType {
         MessageA,
         // MessageB(u8, String),
         MessageC { c_foo: u64, c_bar: String },
     }
 
     struct TestWorker2 {
-        // ToDo: is there any way to automate this or, at least, enforce?
         inbox: Inbox,
     }
 
-    impl TestWorker2 {
-        fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
-            Self {
-                inbox: Inbox::new(zmq_ctx, address),
-            }
+    impl SecondMessageTypeHandler for TestWorker2 {
+        fn receive(&self) -> Vec<u8> {
+            self.inbox.receive()
+        }
+
+        fn pre_run(&mut self) {
+            println!("This is pre_run!");
         }
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
@@ -214,6 +221,14 @@ mod tests {
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
             println!("Received message C: c_foo: {}, c_bar: {}", c_foo, c_bar);
             ShouldTerminate::from(false)
+        }
+    }
+
+    impl TestWorker2 {
+        fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
+            Self {
+                inbox: Inbox::new(zmq_ctx, address),
+            }
         }
     }
 
@@ -237,13 +252,13 @@ mod tests {
         });
 
         let mailbox = Outbox::new(ctx, &address);
-        let message = TestWorker2Message::MessageC {
+        let message = SecondMessageType::MessageC {
             c_foo: 42,
             c_bar: "hello world".to_owned(),
         };
         mailbox.send(&message);
 
-        let message = TestWorker2Message::MessageA;
+        let message = SecondMessageType::MessageA;
         mailbox.send(&message);
 
         thread_handle.join().expect("Cannot join worker thread");
