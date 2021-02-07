@@ -1,6 +1,7 @@
 use bincode::config;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
+use std::sync::mpsc;
 
 pub use custom_derive::actor_message;
 
@@ -17,27 +18,11 @@ impl From<&str> for Address {
     }
 }
 
-// ToDo: Result?
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ShouldTerminate(bool);
-
-impl From<bool> for ShouldTerminate {
-    fn from(value: bool) -> Self {
-        Self(value)
-    }
-}
-
-impl Into<bool> for ShouldTerminate {
-    fn into(self) -> bool {
-        self.0
-    }
-}
-
-pub struct Inbox {
+pub struct ZmqInbox {
     control_socket: zmq::Socket,
 }
 
-impl Inbox {
+impl ZmqInbox {
     pub fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
         let control_socket = zmq_ctx
             .socket(zmq::PULL)
@@ -46,7 +31,7 @@ impl Inbox {
             .bind(&address.conn_string)
             .expect("Cannot connect control socket");
 
-        Inbox { control_socket }
+        Self { control_socket }
     }
 
     pub fn receive(&self) -> Vec<u8> {
@@ -81,10 +66,39 @@ impl Outbox {
             .expect("Cannot send message to worker");
     }
 }
+pub struct ChannelInbox<MessageType> {
+    receiver: mpsc::Receiver<MessageType>,
+}
+
+#[derive(Clone)]
+pub struct ChannelOutbox<MessageType> {
+    sender: mpsc::Sender<MessageType>,
+}
+
+pub fn new_channel_pipe<MessageType>() -> (ChannelOutbox<MessageType>, ChannelInbox<MessageType>) {
+    let (tx, rx) = mpsc::channel();
+    (ChannelOutbox { sender: tx }, ChannelInbox { receiver: rx })
+}
+
+// ToDo: Result?
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShouldTerminate(bool);
+
+impl From<bool> for ShouldTerminate {
+    fn from(value: bool) -> Self {
+        Self(value)
+    }
+}
+
+impl Into<bool> for ShouldTerminate {
+    fn into(self) -> bool {
+        self.0
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use crate::{Address, Inbox, Outbox, ShouldTerminate};
+    use crate::{Address, Outbox, ShouldTerminate, ZmqInbox};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -98,15 +112,13 @@ mod tests {
         fn pre_run(&mut self) {}
         fn post_run(&mut self) {}
 
-        fn receive(&self) -> Vec<u8>;
+        fn receive(&self) -> FirstMessageType;
 
         fn run(&mut self) {
             loop {
                 self.pre_run();
 
-                let message_bytes = self.receive();
-                let message: FirstMessageType =
-                    bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
+                let message = self.receive();
                 if self.dispatch_message(message).0 {
                     break;
                 }
@@ -130,14 +142,17 @@ mod tests {
         fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate;
     }
 
-    struct TestWorker1 {
-        inbox: Inbox,
+    struct HandmadeZmqWorker {
+        inbox: ZmqInbox,
         payload: u64,
     }
 
-    impl FirstMessageTypeHandler for TestWorker1 {
-        fn receive(&self) -> Vec<u8> {
-            self.inbox.receive()
+    impl FirstMessageTypeHandler for HandmadeZmqWorker {
+        fn receive(&self) -> FirstMessageType {
+            let message_bytes = self.inbox.receive();
+            let message: FirstMessageType =
+                bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
+            message
         }
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
@@ -157,30 +172,24 @@ mod tests {
         }
     }
 
-    impl TestWorker1 {
+    impl HandmadeZmqWorker {
         fn new(zmq_ctx: zmq::Context, address: &Address, payload: u64) -> Self {
             Self {
-                inbox: Inbox::new(zmq_ctx, address),
+                inbox: ZmqInbox::new(zmq_ctx, address),
                 payload,
             }
         }
     }
 
     #[test]
-    fn create_handmade_worker() {
-        let ctx = zmq::Context::new();
-        TestWorker1::new(ctx, &Address::from("inproc://worker1"), 42);
-    }
-
-    #[test]
-    fn run_handmade_worker() {
+    fn run_handmade_zmq_worker() {
         let ctx = zmq::Context::new();
         let address = Address::from("inproc://worker1");
 
         let ctx_copy = ctx.clone();
         let address_copy = address.clone();
         let thread_handle = std::thread::spawn(move || {
-            let mut worker = TestWorker1::new(ctx_copy, &address_copy, 42);
+            let mut worker = HandmadeZmqWorker::new(ctx_copy, &address_copy, 42);
 
             worker.run();
         });
@@ -201,7 +210,7 @@ mod tests {
     }
 
     struct TestWorker2 {
-        inbox: Inbox,
+        inbox: ZmqInbox,
     }
 
     impl SecondMessageTypeHandler for TestWorker2 {
@@ -227,19 +236,13 @@ mod tests {
     impl TestWorker2 {
         fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
             Self {
-                inbox: Inbox::new(zmq_ctx, address),
+                inbox: ZmqInbox::new(zmq_ctx, address),
             }
         }
     }
 
     #[test]
-    fn create_derived_worker() {
-        let ctx = zmq::Context::new();
-        TestWorker2::new(ctx, &Address::from("inproc://worker2"));
-    }
-
-    #[test]
-    fn run_derived_worker() {
+    fn run_derived_zmq_worker() {
         let ctx = zmq::Context::new();
         let address = Address::from("inproc://worker2");
 
