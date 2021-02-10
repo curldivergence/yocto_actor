@@ -1,20 +1,58 @@
 use bincode::config;
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
-use std::sync::mpsc;
+use std::io::Write;
 
 pub use custom_derive::actor_message;
 
+const ADDRESS_LENGTH: usize = 32;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Address {
-    conn_string: String,
+    // #[serde(with = "serde_bytes")]
+    conn_string: [u8; ADDRESS_LENGTH],
 }
 
-impl From<&str> for Address {
-    fn from(conn_string: &str) -> Self {
-        Self {
-            conn_string: conn_string.to_owned(),
+impl std::fmt::Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+pub enum AddressType {
+    Local,
+    Remote,
+}
+
+impl Address {
+    pub fn new(address_type: AddressType) -> Self {
+        let mut conn_string = [0 as u8; ADDRESS_LENGTH];
+        write!(
+            &mut conn_string[..],
+            "{}://{:X}",
+            match address_type {
+                AddressType::Local => "inproc",
+                AddressType::Remote => "tcp",
+            },
+            rand::random::<u64>()
+        )
+        .expect("Cannot create address");
+
+        Self { conn_string }
+    }
+
+    pub fn get_type(&self) -> AddressType {
+        match self.conn_string[..3] {
+            // 'inp'
+            [0x69, 0x6e, 0x70] => AddressType::Local,
+            // 'tcp'
+            [0x74, 0x63, 0x70] => AddressType::Remote,
+            _ => panic!("Address connection string is malformed"),
         }
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.conn_string)
+            .expect("Address connection string is not valid utf-8")
     }
 }
 
@@ -28,7 +66,7 @@ impl Inbox {
             .socket(zmq::PULL)
             .expect("Cannot create control socket");
         control_socket
-            .bind(&address.conn_string)
+            .bind(address.as_str())
             .expect("Cannot connect control socket");
 
         Self { control_socket }
@@ -41,7 +79,6 @@ impl Inbox {
     }
 }
 
-// ToDo: store receiver name or some kind of id?
 pub struct Outbox {
     control_socket: zmq::Socket,
     dest_address: Address,
@@ -55,7 +92,7 @@ impl Outbox {
             .socket(zmq::PUSH)
             .expect("Cannot create control socket");
         control_socket
-            .connect(&dest_address.conn_string)
+            .connect(dest_address.as_str())
             .expect("Cannot connect control socket");
 
         Self {
@@ -65,52 +102,49 @@ impl Outbox {
         }
     }
 
-    pub fn send<MessageType: serde::Serialize>(&self, message: MessageType) {
-        let message_bytes = bincode::serialize(message).expect("Cannot serialize message");
-        let envelope = Envelope {
-            to: self.dest_address,
-            from: self.source_address,
-            payload,
-        };
+    pub fn send<MessageType: serde::Serialize>(&self, message: &MessageType) {
+        let mut message_bytes = bincode::serialize(message).expect("Cannot serialize message");
+        message_bytes.extend(self.source_address.conn_string.iter());
+        message_bytes.extend(self.dest_address.conn_string.iter());
+
         self.control_socket
             .send(&message_bytes, 0)
             .expect("Cannot send message to worker");
     }
 }
 
-pub struct Envelope {
-    pub from: Address,
-    pub to: Address,
-    pub payload: Vec<u8>,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Envelope(Vec<u8>);
+
+impl Envelope {
+    pub fn open(mut self) -> (Address, Address, Vec<u8>) {
+        let mut dest_address = [0 as u8; ADDRESS_LENGTH];
+        for (idx, byte) in self.0.drain(self.0.len() - ADDRESS_LENGTH..).enumerate() {
+            dest_address[idx] = byte;
+        }
+
+        let mut source_address = [0 as u8; ADDRESS_LENGTH];
+        for (idx, byte) in self.0.drain(self.0.len() - ADDRESS_LENGTH..).enumerate() {
+            source_address[idx] = byte;
+        }
+
+        (
+            Address {
+                conn_string: dest_address,
+            },
+            Address {
+                conn_string: source_address,
+            },
+            self.0,
+        )
+    }
 }
 
-// pub struct ChannelInbox<MessageType> {
-//     receiver: mpsc::Receiver<MessageType>,
-// }
-
-// impl<MessageType> ChannelInbox<MessageType> {
-//     fn receive(&self) -> MessageType {
-//         self.receiver.recv().expect("Cannot receive from inbox")
-//     }
-// }
-
-// #[derive(Clone)]
-// pub struct ChannelOutbox<MessageType> {
-//     sender: mpsc::Sender<MessageType>,
-// }
-
-// impl<MessageType> ChannelOutbox<MessageType> {
-//     fn send(&self, message: MessageType) {
-//         self.sender
-//             .send(message)
-//             .expect("Cannot send message to channel")
-//     }
-// }
-
-// pub fn make_channel_pipe<MessageType>() -> (ChannelOutbox<MessageType>, ChannelInbox<MessageType>) {
-//     let (tx, rx) = mpsc::channel();
-//     (ChannelOutbox { sender: tx }, ChannelInbox { receiver: rx })
-// }
+impl From<Vec<u8>> for Envelope {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
 
 // ToDo: Result?
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -132,7 +166,7 @@ impl Into<bool> for ShouldTerminate {
 mod tests {
     use std::unimplemented;
 
-    use crate::{Address, Inbox, Outbox, ShouldTerminate};
+    use crate::{Address, AddressType, Envelope, Inbox, Outbox, ShouldTerminate};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -183,9 +217,12 @@ mod tests {
 
     impl FirstMessageTypeHandler for HandmadeWorker {
         fn receive(&self) -> FirstMessageType {
-            let message_bytes = self.inbox.receive();
+            let envelope = Envelope::from(self.inbox.receive());
+            let (_, _, message_bytes) = envelope.open();
+
             let message: FirstMessageType =
-                bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
+                bincode::deserialize(&message_bytes).expect("Actor cannot deserialize envelope");
+
             message
         }
 
@@ -218,7 +255,7 @@ mod tests {
     #[test]
     fn run_handmade_worker() {
         let ctx = zmq::Context::new();
-        let address = Address::from("inproc://worker1");
+        let address = Address::new(AddressType::Local);
 
         let ctx_copy = ctx.clone();
         let address_copy = address.clone();
