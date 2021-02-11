@@ -188,7 +188,7 @@ mod tests {
                 self.pre_run();
 
                 let message = self.receive();
-                if self.dispatch_message(message).0 {
+                if self.dispatch_message(message).into() {
                     break;
                 }
 

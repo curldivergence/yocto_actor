@@ -3,6 +3,9 @@ name = "yocto_actor"
 version = "0.1.0"
 authors = ["Andrey Pushkar <mail@apushkar.me>"]
 edition = "2018"
+description = "A tiny and extra-simplistic actor model implementation based on ZeroMQ"
+keywords = ["actor", "zeromq", "zmq"]
+repository = "https://github.com/curldivergence/yocto_actor"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
