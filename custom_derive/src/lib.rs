@@ -97,16 +97,14 @@ pub fn actor_message(
             fn pre_run(&mut self) {}
             fn post_run(&mut self) {}
 
-            fn receive(&self) -> Vec<u8>;
+            fn receive(&self) -> #enum_name;
 
             fn run(&mut self) {
                 loop {
                     self.pre_run();
 
-                    let message_bytes = self.receive();
-                    let message: #enum_name =
-                        bincode::deserialize(&message_bytes).expect("Actor cannot deserialize message");
-                    if self.dispatch_message(message).into() {
+                    let message = self.receive();
+                    if self.dispatch_message(message).0 {
                         break;
                     }
 

@@ -25,7 +25,9 @@ pub enum AddressType {
 
 impl Address {
     pub fn new(address_type: AddressType) -> Self {
-        let mut conn_string = [0 as u8; ADDRESS_LENGTH];
+        // zmq doesn't like zero bytes in connection strings,
+        // so let's pad them with 'x' (ascii code 120)
+        let mut conn_string = [120 as u8; ADDRESS_LENGTH];
         write!(
             &mut conn_string[..],
             "{}://{:X}",
@@ -172,8 +174,7 @@ mod tests {
     #[derive(Serialize, Deserialize)]
     enum FirstMessageType {
         MessageA,
-        MessageB(u8, String),
-        MessageC { c_foo: u64, c_bar: String },
+        MessageB { c_foo: u64, c_bar: String },
     }
 
     trait FirstMessageTypeHandler {
@@ -198,20 +199,19 @@ mod tests {
         fn dispatch_message(&mut self, message: FirstMessageType) -> ShouldTerminate {
             match message {
                 FirstMessageType::MessageA => self.handle_message_a(),
-                FirstMessageType::MessageB(val1, val2) => self.handle_message_b((val1, val2)),
-                FirstMessageType::MessageC { c_foo, c_bar } => self.handle_message_c(c_foo, c_bar),
+                FirstMessageType::MessageB { c_foo, c_bar } => self.handle_message_b(c_foo, c_bar),
             }
         }
 
         // Event handlers
 
         fn handle_message_a(&mut self) -> ShouldTerminate;
-        fn handle_message_b(&mut self, data: (u8, String)) -> ShouldTerminate;
-        fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate;
+        fn handle_message_b(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate;
     }
 
     struct HandmadeWorker {
         inbox: Inbox,
+        next_stage_outbox: Outbox,
         payload: u64,
     }
 
@@ -227,14 +227,15 @@ mod tests {
         }
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
+            self.next_stage_outbox.send(&FirstMessageType::MessageA);
             ShouldTerminate::from(true)
         }
 
-        fn handle_message_b(&mut self, params: (u8, String)) -> ShouldTerminate {
-            ShouldTerminate::from(false)
-        }
-
-        fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
+        fn handle_message_b(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
+            self.next_stage_outbox.send(&FirstMessageType::MessageB {
+                c_foo: c_foo + self.payload,
+                c_bar: "String payload".to_owned(),
+            });
             ShouldTerminate::from(false)
         }
 
@@ -244,9 +245,15 @@ mod tests {
     }
 
     impl HandmadeWorker {
-        fn new(zmq_ctx: zmq::Context, address: &Address, payload: u64) -> Self {
+        fn new(
+            zmq_ctx: zmq::Context,
+            worker_address: &Address,
+            next_stage_address: &Address,
+            payload: u64,
+        ) -> Self {
             Self {
-                inbox: Inbox::new(zmq_ctx, address),
+                inbox: Inbox::new(zmq_ctx.clone(), worker_address),
+                next_stage_outbox: Outbox::new(zmq_ctx, next_stage_address, worker_address),
                 payload,
             }
         }
@@ -255,106 +262,151 @@ mod tests {
     #[test]
     fn run_handmade_worker() {
         let ctx = zmq::Context::new();
-        let address = Address::new(AddressType::Local);
 
-        let ctx_copy = ctx.clone();
-        let address_copy = address.clone();
-        let thread_handle = std::thread::spawn(move || {
-            let mut worker = HandmadeWorker::new(ctx_copy, &address_copy, 42);
+        let first_worker_address = Address::new(AddressType::Local);
+        eprintln!("first_worker_address: {}", &first_worker_address);
 
-            worker.run();
+        let second_worker_address = Address::new(AddressType::Local);
+        eprintln!("second_worker_address: {}", &second_worker_address);
+
+        let spawner_address = Address::new(AddressType::Local);
+        eprintln!("spawner_address: {}", &spawner_address);
+
+        let inbox = Inbox::new(ctx.clone(), &spawner_address);
+
+        let first_worker_thread = {
+            let ctx_copy = ctx.clone();
+            let first_worker_address_copy = first_worker_address.clone();
+            let second_worker_address_copy = second_worker_address.clone();
+
+            std::thread::spawn(move || {
+                let mut first_worker = HandmadeWorker::new(
+                    ctx_copy,
+                    &first_worker_address_copy,
+                    &second_worker_address_copy,
+                    42,
+                );
+
+                first_worker.run();
+            })
+        };
+
+        let second_worker_thread = {
+            let ctx_copy = ctx.clone();
+            let second_worker_address_copy = second_worker_address.clone();
+            let spawner_address_copy = spawner_address.clone();
+
+            std::thread::spawn(move || {
+                let mut second_worker = HandmadeWorker::new(
+                    ctx_copy,
+                    &second_worker_address_copy,
+                    &spawner_address_copy,
+                    43,
+                );
+
+                second_worker.run();
+            })
+        };
+
+        let outbox = Outbox::new(ctx.clone(), &first_worker_address, &spawner_address);
+        outbox.send(&FirstMessageType::MessageB {
+            c_foo: 50,
+            c_bar: "Ta-da-da".to_owned(),
         });
 
-        let outbox = Outbox::new(ctx, &address);
-        let message = FirstMessageType::MessageA;
-        outbox.send(&message);
-        thread_handle.join().expect("Cannot join worker thread");
+        {
+            let envelope = Envelope::from(inbox.receive());
+            let (_, _, message_bytes) = envelope.open();
+
+            let message: FirstMessageType =
+                bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
+
+            if let FirstMessageType::MessageB { c_foo, c_bar } = message {
+                eprintln!("Spawner received message B: {}", &c_foo);
+                assert_eq!(c_foo, 50 + 42 + 43);
+            } else {
+                panic!("Spawner received wrong message type (expected A, received B)");
+            }
+        }
+
+        outbox.send(&FirstMessageType::MessageA);
+
+        {
+            let envelope = Envelope::from(inbox.receive());
+            let (_, _, message_bytes) = envelope.open();
+
+            let message: FirstMessageType =
+                bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
+            match message {
+                FirstMessageType::MessageA => {}
+                FirstMessageType::MessageB { .. } => {
+                    panic!("Spawner received wrong message type (expected B, received A)")
+                }
+            }
+        }
+
+        first_worker_thread
+            .join()
+            .expect("Cannot join first worker");
+        second_worker_thread
+            .join()
+            .expect("Cannot join second worker");
     }
-
-    // struct HandmadeChannelWorker<MessageType> {
-    //     inbox: ChannelInbox<MessageType>,
-    // }
-
-    // impl FirstMessageTypeHandler for HandmadeChannelWorker<FirstMessageType> {
-    //     fn receive(&self) -> FirstMessageType {
-    //         self.inbox.receive()
-    //     }
-
-    //     fn handle_message_a(&mut self) -> ShouldTerminate {
-    //         ShouldTerminate::from(true)
-    //     }
-
-    //     fn handle_message_b(&mut self, params: (u8, String)) -> ShouldTerminate {
-    //         ShouldTerminate::from(false)
-    //     }
-
-    //     fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
-    //         ShouldTerminate::from(false)
-    //     }
-
-    //     fn pre_run(&mut self) {
-    //         println!("This is pre_run!");
-    //     }
-    // }
-
-    // impl<MessageType> HandmadeChannelWorker<MessageType> {
-    //     fn new() -> (Self, ChannelOutbox<MessageType>) {
-    //         let (tx, rx) = make_channel_pipe();
-
-    //         return (Self { inbox: rx }, tx);
-    //     }
-    // }
-
-    // #[test]
-    // fn run_channel_worker() {
-    //     let (mut worker, outbox) = HandmadeChannelWorker::new();
-
-    //     let thread_handle = std::thread::spawn(move || {
-    //         worker.run();
-    //     });
-
-    //     let message = FirstMessageType::MessageA;
-    //     outbox.send(message);
-    //     thread_handle.join().expect("Cannot join worker thread");
-    // }
 
     use custom_derive::actor_message;
     #[actor_message]
     #[derive(Serialize, Deserialize)]
     enum SecondMessageType {
         MessageA,
-        // MessageB(u8, String),
-        MessageC { c_foo: u64, c_bar: String },
+        MessageB { c_foo: u64, c_bar: String },
     }
 
-    struct DerivedZmqWorker {
+    struct DerivedWorker {
         inbox: Inbox,
+        next_stage_outbox: Outbox,
+        payload: u64,
     }
 
-    impl SecondMessageTypeHandler for DerivedZmqWorker {
-        fn receive(&self) -> Vec<u8> {
-            self.inbox.receive()
+    impl SecondMessageTypeHandler for DerivedWorker {
+        fn receive(&self) -> SecondMessageType {
+            let envelope = Envelope::from(self.inbox.receive());
+            let (_, _, message_bytes) = envelope.open();
+
+            let message: SecondMessageType =
+                bincode::deserialize(&message_bytes).expect("Actor cannot deserialize envelope");
+
+            message
+        }
+
+        fn handle_message_a(&mut self) -> ShouldTerminate {
+            self.next_stage_outbox.send(&FirstMessageType::MessageA);
+            ShouldTerminate::from(true)
+        }
+
+        fn handle_message_b(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
+            self.next_stage_outbox.send(&FirstMessageType::MessageB {
+                c_foo: c_foo + self.payload,
+                c_bar: "String payload".to_owned(),
+            });
+            ShouldTerminate::from(false)
         }
 
         fn pre_run(&mut self) {
             println!("This is pre_run!");
         }
-
-        fn handle_message_a(&mut self) -> ShouldTerminate {
-            println!("Received message A");
-            ShouldTerminate::from(true)
-        }
-
-        fn handle_message_c(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
-            println!("Received message C: c_foo: {}, c_bar: {}", c_foo, c_bar);
-            ShouldTerminate::from(false)
-        }
     }
 
-    impl DerivedZmqWorker {
-        fn new(zmq_ctx: zmq::Context, address: &Address) -> Self {
+    impl DerivedWorker {
+        fn new(
+            zmq_ctx: zmq::Context,
+            worker_address: &Address,
+            next_stage_address: &Address,
+            payload: u64,
+        ) -> Self {
             Self {
-                inbox: Inbox::new(zmq_ctx, address),
+                inbox: Inbox::new(zmq_ctx.clone(), worker_address),
+                next_stage_outbox: Outbox::new(zmq_ctx, next_stage_address, worker_address),
+                payload,
             }
         }
     }
@@ -362,26 +414,94 @@ mod tests {
     #[test]
     fn run_derived_worker() {
         let ctx = zmq::Context::new();
-        let address = Address::from("inproc://worker2");
 
-        let ctx_copy = ctx.clone();
-        let address_copy = address.clone();
-        let thread_handle = std::thread::spawn(move || {
-            let mut worker = DerivedZmqWorker::new(ctx_copy, &address_copy);
+        let first_worker_address = Address::new(AddressType::Local);
+        eprintln!("first_worker_address: {}", &first_worker_address);
 
-            worker.run();
+        let second_worker_address = Address::new(AddressType::Local);
+        eprintln!("second_worker_address: {}", &second_worker_address);
+
+        let spawner_address = Address::new(AddressType::Local);
+        eprintln!("spawner_address: {}", &spawner_address);
+
+        let inbox = Inbox::new(ctx.clone(), &spawner_address);
+
+        let first_worker_thread = {
+            let ctx_copy = ctx.clone();
+            let first_worker_address_copy = first_worker_address.clone();
+            let second_worker_address_copy = second_worker_address.clone();
+
+            std::thread::spawn(move || {
+                let mut first_worker = DerivedWorker::new(
+                    ctx_copy,
+                    &first_worker_address_copy,
+                    &second_worker_address_copy,
+                    42,
+                );
+
+                first_worker.run();
+            })
+        };
+
+        let second_worker_thread = {
+            let ctx_copy = ctx.clone();
+            let second_worker_address_copy = second_worker_address.clone();
+            let spawner_address_copy = spawner_address.clone();
+
+            std::thread::spawn(move || {
+                let mut second_worker = DerivedWorker::new(
+                    ctx_copy,
+                    &second_worker_address_copy,
+                    &spawner_address_copy,
+                    43,
+                );
+
+                second_worker.run();
+            })
+        };
+
+        let outbox = Outbox::new(ctx.clone(), &first_worker_address, &spawner_address);
+        outbox.send(&FirstMessageType::MessageB {
+            c_foo: 50,
+            c_bar: "Ta-da-da".to_owned(),
         });
 
-        let mailbox = Outbox::new(ctx, &address);
-        let message = SecondMessageType::MessageC {
-            c_foo: 42,
-            c_bar: "hello world".to_owned(),
-        };
-        mailbox.send(&message);
+        {
+            let envelope = Envelope::from(inbox.receive());
+            let (_, _, message_bytes) = envelope.open();
 
-        let message = SecondMessageType::MessageA;
-        mailbox.send(&message);
+            let message: FirstMessageType =
+                bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
 
-        thread_handle.join().expect("Cannot join worker thread");
+            if let FirstMessageType::MessageB { c_foo, c_bar } = message {
+                eprintln!("Spawner received message B: {}", &c_foo);
+                assert_eq!(c_foo, 50 + 42 + 43);
+            } else {
+                panic!("Spawner received wrong message type (expected A, received B)");
+            }
+        }
+
+        outbox.send(&FirstMessageType::MessageA);
+
+        {
+            let envelope = Envelope::from(inbox.receive());
+            let (_, _, message_bytes) = envelope.open();
+
+            let message: FirstMessageType =
+                bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
+            match message {
+                FirstMessageType::MessageA => {}
+                FirstMessageType::MessageB { .. } => {
+                    panic!("Spawner received wrong message type (expected B, received A)")
+                }
+            }
+        }
+
+        first_worker_thread
+            .join()
+            .expect("Cannot join first worker");
+        second_worker_thread
+            .join()
+            .expect("Cannot join second worker");
     }
 }
