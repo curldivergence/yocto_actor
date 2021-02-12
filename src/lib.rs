@@ -58,6 +58,15 @@ impl Address {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShouldBlock(bool);
+
+impl From<bool> for ShouldBlock {
+    fn from(value: bool) -> Self {
+        Self(value)
+    }
+}
+
 pub struct Inbox {
     control_socket: zmq::Socket,
 }
@@ -74,10 +83,21 @@ impl Inbox {
         Self { control_socket }
     }
 
-    pub fn receive(&self) -> Vec<u8> {
-        self.control_socket
-            .recv_bytes(0)
-            .expect("Actor cannot receive message bytes")
+    pub fn receive(&self, should_block: ShouldBlock) -> Option<Vec<u8>> {
+        match self.control_socket.recv_bytes(if should_block.0 {
+            0
+        } else {
+            // This is actually bad since we should have used ZMQ_NOBLOCK here,
+            // but zmq crate does not expose it :( Fortunately, integer values
+            // of these enum variants coincide
+            zmq::DONTWAIT
+        }) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => match err {
+                zmq::Error::EAGAIN => None,
+                _ => panic!("Actor failed to receive message"),
+            },
+        }
     }
 }
 
@@ -168,7 +188,7 @@ impl Into<bool> for ShouldTerminate {
 mod tests {
     use std::unimplemented;
 
-    use crate::{Address, AddressType, Envelope, Inbox, Outbox, ShouldTerminate};
+    use crate::{Address, AddressType, Envelope, Inbox, Outbox, ShouldBlock, ShouldTerminate};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -217,7 +237,11 @@ mod tests {
 
     impl FirstMessageTypeHandler for HandmadeWorker {
         fn receive(&self) -> FirstMessageType {
-            let envelope = Envelope::from(self.inbox.receive());
+            let envelope = Envelope::from(
+                self.inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
             let (_, _, message_bytes) = envelope.open();
 
             let message: FirstMessageType =
@@ -315,7 +339,11 @@ mod tests {
         });
 
         {
-            let envelope = Envelope::from(inbox.receive());
+            let envelope = Envelope::from(
+                inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
             let (_, _, message_bytes) = envelope.open();
 
             let message: FirstMessageType =
@@ -332,7 +360,11 @@ mod tests {
         outbox.send(&FirstMessageType::MessageA);
 
         {
-            let envelope = Envelope::from(inbox.receive());
+            let envelope = Envelope::from(
+                inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
             let (_, _, message_bytes) = envelope.open();
 
             let message: FirstMessageType =
@@ -369,7 +401,11 @@ mod tests {
 
     impl SecondMessageTypeHandler for DerivedWorker {
         fn receive(&self) -> SecondMessageType {
-            let envelope = Envelope::from(self.inbox.receive());
+            let envelope = Envelope::from(
+                self.inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
             let (_, _, message_bytes) = envelope.open();
 
             let message: SecondMessageType =
@@ -467,7 +503,11 @@ mod tests {
         });
 
         {
-            let envelope = Envelope::from(inbox.receive());
+            let envelope = Envelope::from(
+                inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
             let (_, _, message_bytes) = envelope.open();
 
             let message: FirstMessageType =
@@ -484,7 +524,11 @@ mod tests {
         outbox.send(&FirstMessageType::MessageA);
 
         {
-            let envelope = Envelope::from(inbox.receive());
+            let envelope = Envelope::from(
+                inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
             let (_, _, message_bytes) = envelope.open();
 
             let message: FirstMessageType =
