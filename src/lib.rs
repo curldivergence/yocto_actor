@@ -19,27 +19,39 @@ impl std::fmt::Display for Address {
 }
 
 pub enum AddressType {
+    // ToDo: probably this should be renamed so that it's clear
+    // that it's an inproc address, not a local IP one
     Local,
     Remote,
 }
 
+// ToDo: impl From<std::net::IpAddr>
 impl Address {
     pub fn new(address_type: AddressType) -> Self {
-        // zmq doesn't like zero bytes in connection strings,
-        // so let's pad them with 'x' (ascii code 120)
-        let mut conn_string = [120 as u8; ADDRESS_LENGTH];
-        write!(
-            &mut conn_string[..],
-            "{}://{:X}",
-            match address_type {
-                AddressType::Local => "inproc",
-                AddressType::Remote => "tcp",
-            },
-            rand::random::<u64>()
-        )
-        .expect("Cannot create address");
+        let mut conn_string = [0 as u8; ADDRESS_LENGTH];
 
-        Self { conn_string }
+        match address_type {
+            AddressType::Local => {
+                write!(
+                    &mut conn_string[..],
+                    "inproc://{}",
+                    silly_names::make_name(ADDRESS_LENGTH - "inproc://".len())
+                )
+                .expect("Cannot create address");
+
+                Self { conn_string }
+            }
+            AddressType::Remote => {
+                write!(
+                    &mut conn_string[..],
+                    "tcp://127.0.0.1:{}",
+                    5000 + rand::random::<u64>() % 5000
+                )
+                .expect("Cannot create address");
+
+                Self { conn_string }
+            }
+        }
     }
 
     pub fn get_type(&self) -> AddressType {
@@ -67,6 +79,14 @@ impl From<bool> for ShouldBlock {
     }
 }
 
+fn truncate_byte_array_string(bytes: &[u8]) -> &str {
+    // zmq converts our &str into a CString so it gets mad when
+    // we pass a string with zero bytes
+    let zero_byte_position = bytes.iter().position(|&v| v == 0).unwrap_or(bytes.len());
+    let truncated_bytes = &bytes[..zero_byte_position];
+    std::str::from_utf8(truncated_bytes).expect("Truncated string is not valid utf-8")
+}
+
 pub struct Inbox {
     control_socket: zmq::Socket,
 }
@@ -76,8 +96,9 @@ impl Inbox {
         let control_socket = zmq_ctx
             .socket(zmq::PULL)
             .expect("Cannot create control socket");
+
         control_socket
-            .bind(address.as_str())
+            .bind(truncate_byte_array_string(&address.conn_string))
             .expect("Cannot connect control socket");
 
         Self { control_socket }
@@ -114,7 +135,7 @@ impl Outbox {
             .socket(zmq::PUSH)
             .expect("Cannot create control socket");
         control_socket
-            .connect(dest_address.as_str())
+            .connect(truncate_byte_array_string(&dest_address.conn_string))
             .expect("Cannot connect control socket");
 
         Self {
@@ -448,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn run_derived_worker() {
+    fn run_derived_worker_local() {
         let ctx = zmq::Context::new();
 
         let first_worker_address = Address::new(AddressType::Local);
@@ -458,6 +479,108 @@ mod tests {
         eprintln!("second_worker_address: {}", &second_worker_address);
 
         let spawner_address = Address::new(AddressType::Local);
+        eprintln!("spawner_address: {}", &spawner_address);
+
+        let inbox = Inbox::new(ctx.clone(), &spawner_address);
+
+        let first_worker_thread = {
+            let ctx_copy = ctx.clone();
+            let first_worker_address_copy = first_worker_address.clone();
+            let second_worker_address_copy = second_worker_address.clone();
+
+            std::thread::spawn(move || {
+                let mut first_worker = DerivedWorker::new(
+                    ctx_copy,
+                    &first_worker_address_copy,
+                    &second_worker_address_copy,
+                    42,
+                );
+
+                first_worker.run();
+            })
+        };
+
+        let second_worker_thread = {
+            let ctx_copy = ctx.clone();
+            let second_worker_address_copy = second_worker_address.clone();
+            let spawner_address_copy = spawner_address.clone();
+
+            std::thread::spawn(move || {
+                let mut second_worker = DerivedWorker::new(
+                    ctx_copy,
+                    &second_worker_address_copy,
+                    &spawner_address_copy,
+                    43,
+                );
+
+                second_worker.run();
+            })
+        };
+
+        let outbox = Outbox::new(ctx.clone(), &first_worker_address, &spawner_address);
+        outbox.send(&FirstMessageType::MessageB {
+            c_foo: 50,
+            c_bar: "Ta-da-da".to_owned(),
+        });
+
+        {
+            let envelope = Envelope::from(
+                inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
+            let (_, _, message_bytes) = envelope.open();
+
+            let message: FirstMessageType =
+                bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
+
+            if let FirstMessageType::MessageB { c_foo, c_bar } = message {
+                eprintln!("Spawner received message B: {}", &c_foo);
+                assert_eq!(c_foo, 50 + 42 + 43);
+            } else {
+                panic!("Spawner received wrong message type (expected A, received B)");
+            }
+        }
+
+        outbox.send(&FirstMessageType::MessageA);
+
+        {
+            let envelope = Envelope::from(
+                inbox
+                    .receive(ShouldBlock::from(true))
+                    .expect("Cannot receive message"),
+            );
+            let (_, _, message_bytes) = envelope.open();
+
+            let message: FirstMessageType =
+                bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
+            match message {
+                FirstMessageType::MessageA => {}
+                FirstMessageType::MessageB { .. } => {
+                    panic!("Spawner received wrong message type (expected B, received A)")
+                }
+            }
+        }
+
+        first_worker_thread
+            .join()
+            .expect("Cannot join first worker");
+        second_worker_thread
+            .join()
+            .expect("Cannot join second worker");
+    }
+
+    #[test]
+    fn run_derived_worker_remote() {
+        let ctx = zmq::Context::new();
+
+        let first_worker_address = Address::new(AddressType::Remote);
+        eprintln!("first_worker_address: {}", &first_worker_address);
+
+        let second_worker_address = Address::new(AddressType::Remote);
+        eprintln!("second_worker_address: {}", &second_worker_address);
+
+        let spawner_address = Address::new(AddressType::Remote);
         eprintln!("spawner_address: {}", &spawner_address);
 
         let inbox = Inbox::new(ctx.clone(), &spawner_address);
