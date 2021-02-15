@@ -73,6 +73,8 @@ impl Address {
     }
 }
 
+pub trait Message: serde::Serialize {}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ShouldBlock(bool);
 
@@ -148,13 +150,19 @@ impl Outbox {
         }
     }
 
-    pub fn send<MessageType: serde::Serialize>(&self, message: &MessageType) {
+    pub fn send_message<M: Message>(&self, message: &M) {
         let mut message_bytes = bincode::serialize(message).expect("Cannot serialize message");
+        // ToDo: move this inside Envelope
         message_bytes.extend(self.source_address.conn_string.iter());
         message_bytes.extend(self.dest_address.conn_string.iter());
 
+        let envelope = Envelope::from(message_bytes);
+        self.send_envelope(&envelope);
+    }
+
+    pub fn send_envelope(&self, envelope: &Envelope) {
         self.control_socket
-            .send(&message_bytes, 0)
+            .send(&envelope.0, 0)
             .expect("Cannot send message to worker");
     }
 }
@@ -227,7 +235,9 @@ impl Into<bool> for ShouldTerminate {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Address, AddressType, Envelope, Inbox, Outbox, ShouldBlock, ShouldTerminate};
+    use crate::{
+        Address, AddressType, Envelope, Inbox, Message, Outbox, ShouldBlock, ShouldTerminate,
+    };
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -235,6 +245,8 @@ mod tests {
         MessageA,
         MessageB { c_foo: u64, c_bar: String },
     }
+
+    impl Message for FirstMessageType {}
 
     trait FirstMessageTypeHandler {
         fn pre_run(&mut self) {}
@@ -290,15 +302,17 @@ mod tests {
         }
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
-            self.next_stage_outbox.send(&FirstMessageType::MessageA);
+            self.next_stage_outbox
+                .send_message(&FirstMessageType::MessageA);
             ShouldTerminate::from(true)
         }
 
         fn handle_message_b(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
-            self.next_stage_outbox.send(&FirstMessageType::MessageB {
-                c_foo: c_foo + self.payload,
-                c_bar,
-            });
+            self.next_stage_outbox
+                .send_message(&FirstMessageType::MessageB {
+                    c_foo: c_foo + self.payload,
+                    c_bar,
+                });
             ShouldTerminate::from(false)
         }
 
@@ -372,7 +386,7 @@ mod tests {
         };
 
         let outbox = Outbox::new(ctx.clone(), &first_worker_address, &spawner_address);
-        outbox.send(&FirstMessageType::MessageB {
+        outbox.send_message(&FirstMessageType::MessageB {
             c_foo: 50,
             c_bar: "Ta-da-da".to_owned(),
         });
@@ -396,7 +410,7 @@ mod tests {
             }
         }
 
-        outbox.send(&FirstMessageType::MessageA);
+        outbox.send_message(&FirstMessageType::MessageA);
 
         {
             let envelope = Envelope::from(
@@ -454,15 +468,17 @@ mod tests {
         }
 
         fn handle_message_a(&mut self) -> ShouldTerminate {
-            self.next_stage_outbox.send(&FirstMessageType::MessageA);
+            self.next_stage_outbox
+                .send_message(&FirstMessageType::MessageA);
             ShouldTerminate::from(true)
         }
 
         fn handle_message_b(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
-            self.next_stage_outbox.send(&FirstMessageType::MessageB {
-                c_foo: c_foo + self.payload,
-                c_bar,
-            });
+            self.next_stage_outbox
+                .send_message(&FirstMessageType::MessageB {
+                    c_foo: c_foo + self.payload,
+                    c_bar,
+                });
             ShouldTerminate::from(false)
         }
 
@@ -536,7 +552,7 @@ mod tests {
         };
 
         let outbox = Outbox::new(ctx.clone(), &first_worker_address, &spawner_address);
-        outbox.send(&FirstMessageType::MessageB {
+        outbox.send_message(&FirstMessageType::MessageB {
             c_foo: 50,
             c_bar: "Ta-da-da".to_owned(),
         });
@@ -560,7 +576,7 @@ mod tests {
             }
         }
 
-        outbox.send(&FirstMessageType::MessageA);
+        outbox.send_message(&FirstMessageType::MessageA);
 
         {
             let envelope = Envelope::from(
@@ -638,7 +654,7 @@ mod tests {
         };
 
         let outbox = Outbox::new(ctx.clone(), &first_worker_address, &spawner_address);
-        outbox.send(&FirstMessageType::MessageB {
+        outbox.send_message(&FirstMessageType::MessageB {
             c_foo: 50,
             c_bar: "Ta-da-da".to_owned(),
         });
@@ -674,7 +690,7 @@ mod tests {
             }
         }
 
-        outbox.send(&FirstMessageType::MessageA);
+        outbox.send_message(&FirstMessageType::MessageA);
 
         {
             let envelope = Envelope::from(

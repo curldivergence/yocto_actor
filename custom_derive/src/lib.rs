@@ -93,6 +93,8 @@ pub fn actor_message(
     expanded.extend(quote! {
         #input
 
+        impl Message for #enum_name {}
+
         pub trait #trait_name {
             fn pre_run(&mut self) {}
             fn post_run(&mut self) {}
