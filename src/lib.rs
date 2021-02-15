@@ -1,4 +1,3 @@
-use bincode::config;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -185,6 +184,23 @@ impl Envelope {
             self.0,
         )
     }
+
+    pub fn peek(&self) -> (DestAddress, SourceAddress) {
+        use std::convert::TryInto;
+        (
+            DestAddress {
+                conn_string: (&self.0[self.0.len() - ADDRESS_LENGTH..])
+                    .try_into()
+                    .expect("Cannot copy destination address from payload"),
+            },
+            SourceAddress {
+                conn_string: (&self.0
+                    [self.0.len() - ADDRESS_LENGTH * 2..self.0.len() - ADDRESS_LENGTH])
+                    .try_into()
+                    .expect("Cannot copy source address from payload"),
+            },
+        )
+    }
 }
 
 impl From<Vec<u8>> for Envelope {
@@ -211,8 +227,6 @@ impl Into<bool> for ShouldTerminate {
 
 #[cfg(test)]
 mod tests {
-    use std::unimplemented;
-
     use crate::{Address, AddressType, Envelope, Inbox, Outbox, ShouldBlock, ShouldTerminate};
     use serde::{Deserialize, Serialize};
 
@@ -283,7 +297,7 @@ mod tests {
         fn handle_message_b(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
             self.next_stage_outbox.send(&FirstMessageType::MessageB {
                 c_foo: c_foo + self.payload,
-                c_bar: "String payload".to_owned(),
+                c_bar,
             });
             ShouldTerminate::from(false)
         }
@@ -374,7 +388,7 @@ mod tests {
             let message: FirstMessageType =
                 bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
 
-            if let FirstMessageType::MessageB { c_foo, c_bar } = message {
+            if let FirstMessageType::MessageB { c_foo, .. } = message {
                 eprintln!("Spawner received message B: {}", &c_foo);
                 assert_eq!(c_foo, 50 + 42 + 43);
             } else {
@@ -413,7 +427,7 @@ mod tests {
     use custom_derive::actor_message;
     #[actor_message]
     #[derive(Serialize, Deserialize)]
-    enum SecondMessageType {
+    pub enum SecondMessageType {
         MessageA,
         MessageB { c_foo: u64, c_bar: String },
     }
@@ -447,7 +461,7 @@ mod tests {
         fn handle_message_b(&mut self, c_foo: u64, c_bar: String) -> ShouldTerminate {
             self.next_stage_outbox.send(&FirstMessageType::MessageB {
                 c_foo: c_foo + self.payload,
-                c_bar: "String payload".to_owned(),
+                c_bar,
             });
             ShouldTerminate::from(false)
         }
@@ -538,7 +552,7 @@ mod tests {
             let message: FirstMessageType =
                 bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
 
-            if let FirstMessageType::MessageB { c_foo, c_bar } = message {
+            if let FirstMessageType::MessageB { c_foo, .. } = message {
                 eprintln!("Spawner received message B: {}", &c_foo);
                 assert_eq!(c_foo, 50 + 42 + 43);
             } else {
@@ -635,12 +649,24 @@ mod tests {
                     .receive(ShouldBlock::from(true))
                     .expect("Cannot receive message"),
             );
-            let (_, _, message_bytes) = envelope.open();
+
+            let (peeked_dest, peeked_source) = envelope.peek();
+            let (dest, source, message_bytes) = envelope.open();
+
+            assert_eq!(
+                &peeked_dest, &dest,
+                "peek() function returned different address than open()"
+            );
+
+            assert_eq!(
+                &peeked_source, &source,
+                "peek() function returned different address than open()"
+            );
 
             let message: FirstMessageType =
                 bincode::deserialize(&message_bytes).expect("Spawner cannot deserialize envelope");
 
-            if let FirstMessageType::MessageB { c_foo, c_bar } = message {
+            if let FirstMessageType::MessageB { c_foo, .. } = message {
                 eprintln!("Spawner received message B: {}", &c_foo);
                 assert_eq!(c_foo, 50 + 42 + 43);
             } else {

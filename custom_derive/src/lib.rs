@@ -3,8 +3,8 @@ extern crate proc_macro2;
 
 use heck::SnakeCase;
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{quote, ToTokens, TokenStreamExt};
-use syn::{parse_macro_input, DeriveInput, Path};
+use quote::quote;
+use syn::{parse_macro_input, DeriveInput};
 
 #[proc_macro_attribute]
 pub fn actor_message(
