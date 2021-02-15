@@ -6,11 +6,15 @@ pub use custom_derive::actor_message;
 
 const ADDRESS_LENGTH: usize = 32;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Address {
     // #[serde(with = "serde_bytes")]
     conn_string: [u8; ADDRESS_LENGTH],
 }
+
+// ToDo: probably these guys should be newtypes and not aliases?
+pub type DestAddress = Address;
+pub type SourceAddress = Address;
 
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -160,7 +164,7 @@ impl Outbox {
 pub struct Envelope(Vec<u8>);
 
 impl Envelope {
-    pub fn open(mut self) -> (Address, Address, Vec<u8>) {
+    pub fn open(mut self) -> (DestAddress, SourceAddress, Vec<u8>) {
         let mut dest_address = [0 as u8; ADDRESS_LENGTH];
         for (idx, byte) in self.0.drain(self.0.len() - ADDRESS_LENGTH..).enumerate() {
             dest_address[idx] = byte;
