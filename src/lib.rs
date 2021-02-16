@@ -151,12 +151,9 @@ impl Outbox {
     }
 
     pub fn send_message<M: Message>(&self, message: &M) {
-        let mut message_bytes = bincode::serialize(message).expect("Cannot serialize message");
-        // ToDo: move this inside Envelope
-        message_bytes.extend(self.source_address.conn_string.iter());
-        message_bytes.extend(self.dest_address.conn_string.iter());
+        let message_bytes = bincode::serialize(message).expect("Cannot serialize message");
 
-        let envelope = Envelope::from(message_bytes);
+        let envelope = Envelope::new(message_bytes, &self.dest_address, &self.source_address);
         self.send_envelope(&envelope);
     }
 
@@ -171,6 +168,17 @@ impl Outbox {
 pub struct Envelope(Vec<u8>);
 
 impl Envelope {
+    pub fn new(
+        mut message_bytes: Vec<u8>,
+        dest_address: &Address,
+        source_address: &Address,
+    ) -> Self {
+        message_bytes.extend(source_address.conn_string.iter());
+        message_bytes.extend(dest_address.conn_string.iter());
+
+        Self::from(message_bytes)
+    }
+
     pub fn open(mut self) -> (DestAddress, SourceAddress, Vec<u8>) {
         let mut dest_address = [0 as u8; ADDRESS_LENGTH];
         for (idx, byte) in self.0.drain(self.0.len() - ADDRESS_LENGTH..).enumerate() {
