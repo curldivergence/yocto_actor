@@ -11,10 +11,6 @@ pub struct Address {
     conn_string: [u8; ADDRESS_LENGTH],
 }
 
-// ToDo: probably these guys should be newtypes and not aliases?
-pub type DestAddress = Address;
-pub type SourceAddress = Address;
-
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
@@ -70,6 +66,49 @@ impl Address {
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.conn_string)
             .expect("Address connection string is not valid utf-8")
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DestAddress(Address);
+
+// DestAddress is a stricter concept than just an Address, so this is only one-way conversion
+impl From<Address> for DestAddress {
+    fn from(value: Address) -> Self {
+        Self(value)
+    }
+}
+
+impl PartialEq<Address> for DestAddress {
+    fn eq(&self, rhs: &Address) -> bool {
+        &self.0 == rhs
+    }
+}
+
+impl std::fmt::Display for DestAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SourceAddress(Address);
+
+impl From<Address> for SourceAddress {
+    fn from(value: Address) -> Self {
+        Self(value)
+    }
+}
+
+impl PartialEq<Address> for SourceAddress {
+    fn eq(&self, rhs: &Address) -> bool {
+        &self.0 == rhs
+    }
+}
+
+impl std::fmt::Display for SourceAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -193,10 +232,12 @@ impl Envelope {
         (
             Address {
                 conn_string: dest_address,
-            },
+            }
+            .into(),
             Address {
                 conn_string: source_address,
-            },
+            }
+            .into(),
             self.0,
         )
     }
@@ -204,17 +245,19 @@ impl Envelope {
     pub fn peek(&self) -> (DestAddress, SourceAddress) {
         use std::convert::TryInto;
         (
-            DestAddress {
+            Address {
                 conn_string: (&self.0[self.0.len() - ADDRESS_LENGTH..])
                     .try_into()
                     .expect("Cannot copy destination address from payload"),
-            },
-            SourceAddress {
+            }
+            .into(),
+            Address {
                 conn_string: (&self.0
                     [self.0.len() - ADDRESS_LENGTH * 2..self.0.len() - ADDRESS_LENGTH])
                     .try_into()
                     .expect("Cannot copy source address from payload"),
-            },
+            }
+            .into(),
         )
     }
 }
